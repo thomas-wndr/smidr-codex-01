@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smidr ChatKit Agent</title>
+  <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js" async></script>
+  <style>
+    :root {
+      color: #000;
+      background: #fff;
+    }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: #fff;
+      color: #000;
+    }
+
+    .panel {
+      width: min(960px, 95vw);
+      border: 1px solid #e5e7eb;
+      border-radius: 7px;
+      padding: 24px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+      background: #fff;
+    }
+
+    h1 {
+      margin: 0 0 16px;
+      text-align: center;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      font-weight: 600;
+      gap: 6px;
+    }
+
+    input, button {
+      border: 1px solid #d1d5db;
+      border-radius: 7px;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: #000;
+      background: #fff;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    button:hover {
+      background: #f3f4f6;
+      border-color: #9ca3af;
+    }
+
+    .chatkit-shell {
+      border: 1px solid #d1d5db;
+      border-radius: 7px;
+      padding: 8px;
+      min-height: 480px;
+      background: #fff;
+    }
+
+    .status {
+      margin: 8px 0 0;
+      font-size: 14px;
+      color: #111;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Chat with your OpenAI Agent</h1>
+    <p style="text-align:center;margin:0 0 16px;">If a workflow ID is configured on the server, it will be used automatically. Otherwise, paste your workflow ID and click "Start chat". API keys are read from the server environment.</p>
+    <div class="grid" id="inputs">
+      <label id="workflowLabel">
+        Workflow ID
+        <input id="workflowId" name="workflowId" placeholder="wf_..." />
+      </label>
+      <label>
+        Optional user/device ID
+        <input id="userId" name="userId" placeholder="anonymous-web-user" />
+      </label>
+    </div>
+    <div class="status" id="workflowStatus" style="margin-bottom:8px;"></div>
+    <button id="start">Start chat</button>
+    <div class="status" id="status"></div>
+    <div id="chatkit" class="chatkit-shell"></div>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const workflowInput = document.getElementById('workflowId');
+    const userInput = document.getElementById('userId');
+    const startBtn = document.getElementById('start');
+    const workflowStatus = document.getElementById('workflowStatus');
+    const workflowLabel = document.getElementById('workflowLabel');
+
+    function setStatus(message) {
+      statusEl.textContent = message || '';
+    }
+
+    function setWorkflowStatus(message) {
+      workflowStatus.textContent = message || '';
+    }
+
+    async function hydrateWorkflowFromServer() {
+      try {
+        const res = await fetch('/api/chatkit/config');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data?.workflow) {
+          workflowInput.value = data.workflow;
+          workflowInput.disabled = true;
+          workflowLabel.style.display = 'none';
+          setWorkflowStatus(`Using server-configured workflow: ${data.workflow}`);
+        }
+      } catch (err) {
+        console.warn('Could not fetch workflow config', err);
+      }
+    }
+
+    async function waitForChatKit() {
+      if (window.ChatKit) return window.ChatKit;
+      return new Promise((resolve) => {
+        const id = setInterval(() => {
+          if (window.ChatKit) {
+            clearInterval(id);
+            resolve(window.ChatKit);
+          }
+        }, 50);
+      });
+    }
+
+    async function getClientSecret(clientSecret) {
+      const workflow = workflowInput.value.trim();
+      const user = userInput.value.trim() || 'anonymous-web-user';
+      const response = await fetch('/api/chatkit/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow, user, clientSecret }),
+      });
+
+      const payload = await response.json().catch(async () => ({ error: await response.text() }));
+
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Unable to create session');
+      }
+
+      return payload.client_secret;
+    }
+
+    async function startChat() {
+      try {
+        setStatus('Preparing chat session...');
+        startBtn.disabled = true;
+        const chatkit = await waitForChatKit();
+
+        const mount = chatkit?.createChatKit?.(document.getElementById('chatkit'))
+          || chatkit?.mountChatKit?.(document.getElementById('chatkit'))
+          || document.getElementById('chatkit');
+
+        if (!mount) {
+          throw new Error('ChatKit client did not load. Please ensure the script is reachable.');
+        }
+
+        if (typeof mount.setOptions === 'function') {
+          mount.setOptions({
+            api: {
+              async getClientSecret(current) {
+                return getClientSecret(current);
+              },
+            },
+          });
+        } else if (chatkit?.setOptions) {
+          chatkit.setOptions({
+            api: {
+              async getClientSecret(current) {
+                return getClientSecret(current);
+              },
+            },
+          });
+        } else {
+          throw new Error('Could not mount ChatKit. Please update to the latest embed script.');
+        }
+
+        setStatus('ChatKit is ready. You can start chatting.');
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message);
+      } finally {
+        startBtn.disabled = false;
+      }
+    }
+
+    startBtn.addEventListener('click', startChat);
+    hydrateWorkflowFromServer();
+  </script>
+</body>
+</html>
